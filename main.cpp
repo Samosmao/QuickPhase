@@ -166,19 +166,34 @@ void UpdateTrayIcon() {
 }
 
 std::vector<Phrase> FindMatches(const std::wstring& typed) {
-    std::vector<Phrase> matches;
-    if (typed.empty()) return matches;
+    std::vector<Phrase> commaMatches;
+    std::vector<Phrase> prefixMatches;
+    if (typed.empty()) return prefixMatches;
 
+    std::wstring commaPrefix = typed + L",";
     for (const auto& p : g_phrases) {
         if (!p.enabled || p.shortcut.empty()) continue;
-        if (_wcsnicmp(p.shortcut.c_str(), typed.c_str(), typed.size()) == 0) {
-            matches.push_back(p);
+        if (_wcsnicmp(p.shortcut.c_str(), commaPrefix.c_str(), commaPrefix.size()) == 0) {
+            commaMatches.push_back(p);
+        } else if (_wcsnicmp(p.shortcut.c_str(), typed.c_str(), typed.size()) == 0) {
+            prefixMatches.push_back(p);
         }
     }
-    std::sort(matches.begin(), matches.end(), [](const Phrase& a, const Phrase& b) {
+
+    if (!commaMatches.empty()) {
+        std::sort(commaMatches.begin(), commaMatches.end(), [&](const Phrase& a, const Phrase& b) {
+            int na = _wtoi(a.shortcut.c_str() + commaPrefix.size());
+            int nb = _wtoi(b.shortcut.c_str() + commaPrefix.size());
+            if (na != nb) return na < nb;
+            return _wcsicmp(a.shortcut.c_str(), b.shortcut.c_str()) < 0;
+        });
+        return commaMatches;
+    }
+
+    std::sort(prefixMatches.begin(), prefixMatches.end(), [](const Phrase& a, const Phrase& b) {
         return _wcsicmp(a.shortcut.c_str(), b.shortcut.c_str()) < 0;
     });
-    return matches;
+    return prefixMatches;
 }
 
 void StartExpansion(const Phrase& phrase, int deleteCount) {
