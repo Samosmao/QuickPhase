@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -296,18 +297,40 @@ bool OcrSnipTool::ExtractCsTarget(const std::wstring& ocrText, std::wstring& out
     outValue.clear();
     if (ocrText.empty()) return false;
 
-    // 1. Check for Order Number (long digit sequence >= 16 digits, e.g. 21 digits)
-    for (size_t i = 0; i < ocrText.size(); ++i) {
-        if (iswdigit(ocrText[i])) {
-            size_t start = i;
-            while (i < ocrText.size() && iswdigit(ocrText[i])) {
-                ++i;
-            }
-            size_t len = i - start;
-            if (len >= 16 && len <= 30) {
-                outType = L"Order Number";
-                outValue = ocrText.substr(start, len);
-                return true;
+    // 1. Check line-by-line from TOP to BOTTOM for Order Number (16..30 digits).
+    // Also handle OCR splitting a long order number with spaces (e.g. two >=6-digit chunks).
+    std::wstringstream wss(ocrText);
+    std::wstring line;
+    while (std::getline(wss, line)) {
+        for (size_t i = 0; i < line.size(); ++i) {
+            if (iswdigit(line[i])) {
+                size_t start = i;
+                while (i < line.size() && iswdigit(line[i])) ++i;
+                std::wstring merged = line.substr(start, i - start);
+                if (merged.size() >= 16 && merged.size() <= 30) {
+                    outType = L"Order Number";
+                    outValue = merged;
+                    return true;
+                }
+                // Check if OCR inserted space(s) inside a long order number (>=6 digits + space + >=6 digits)
+                if (merged.size() >= 6) {
+                    size_t j = i;
+                    while (j < line.size()) {
+                        size_t sp = j;
+                        while (sp < line.size() && line[sp] == L' ') ++sp;
+                        if (sp == j || sp >= line.size() || !iswdigit(line[sp])) break;
+                        size_t dStart = sp;
+                        while (sp < line.size() && iswdigit(line[sp])) ++sp;
+                        if (sp - dStart < 6) break;
+                        merged += line.substr(dStart, sp - dStart);
+                        j = sp;
+                        if (merged.size() >= 16 && merged.size() <= 30) {
+                            outType = L"Order Number";
+                            outValue = merged;
+                            return true;
+                        }
+                    }
+                }
             }
         }
     }
@@ -404,12 +427,10 @@ bool DetectCenteredImageRect(HBITMAP hBmp, int w, int h, RECT& outCrop) {
         return false;
     }
 
-    // 2. Find vertical band around the densest non-dark region in the middle
+    // 2. Find full vertical span from topmost active band (>=20px) to bottommost active band (>=20px)
     int x0 = w / 8;
     int x1 = w - w / 8;
     std::vector<bool> rowActive(h, false);
-    int bestRow = h / 2;
-    int bestCount = -1;
     for (int y = 0; y < h; ++y) {
         int cnt = 0;
         int tot = 0;
@@ -420,34 +441,36 @@ bool DetectCenteredImageRect(HBITMAP hBmp, int w, int h, RECT& outCrop) {
         }
         if (tot > 0 && cnt * 100 >= tot * 4) {
             rowActive[y] = true;
-            if (y >= h / 6 && y <= h - h / 6 && cnt > bestCount) {
-                bestCount = cnt;
-                bestRow = y;
-            }
         }
     }
-    if (bestCount <= 0) return false;
 
-    int top = bestRow;
-    int gap = 0;
-    for (int y = bestRow; y >= 0; --y) {
+    int top = -1;
+    int run = 0;
+    for (int y = 0; y < h; ++y) {
         if (rowActive[y]) {
-            top = y;
-            gap = 0;
-        } else if (++gap > 14) {
-            break;
+            ++run;
+            if (run >= 20) {
+                top = y - run + 1;
+                break;
+            }
+        } else {
+            run = 0;
         }
     }
-    int bottom = bestRow;
-    gap = 0;
-    for (int y = bestRow; y < h; ++y) {
+    int bottom = -1;
+    run = 0;
+    for (int y = h - 1; y >= 0; --y) {
         if (rowActive[y]) {
-            bottom = y;
-            gap = 0;
-        } else if (++gap > 14) {
-            break;
+            ++run;
+            if (run >= 20) {
+                bottom = y + run - 1;
+                break;
+            }
+        } else {
+            run = 0;
         }
     }
+    if (top < 0 || bottom <= top) return false;
 
     // 3. Find horizontal band within [top..bottom]
     std::vector<bool> colActive(w, false);
@@ -471,7 +494,7 @@ bool DetectCenteredImageRect(HBITMAP hBmp, int w, int h, RECT& outCrop) {
     if (bestColCnt <= 0) return false;
 
     int left = bestCol;
-    gap = 0;
+    int gap = 0;
     for (int x = bestCol; x >= 0; --x) {
         if (colActive[x]) {
             left = x;

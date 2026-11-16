@@ -280,32 +280,85 @@ int ImportSogouText(const std::wstring& rawText, std::vector<Phrase>& phrases) {
         while (!s.empty() && (s.back() == L' ' || s.back() == L'\t' || s.back() == L'\r')) s.pop_back();
     };
 
-    while (std::getline(wss, line)) {
-        trim(line);
-        if (line.empty() || line[0] == L';' || line[0] == L'#') continue;
+    auto isShortcutHeader = [&](const std::wstring& ln, std::wstring& outKey, std::wstring& outVal) -> bool {
+        if (ln.empty() || ln[0] == L';' || ln[0] == L'#') return false;
+        size_t eq = ln.find(L'=');
+        if (eq == std::wstring::npos || eq == 0) return false;
 
-        size_t eq = line.find(L'=');
-        if (eq == std::wstring::npos || eq == 0) continue;
-
-        std::wstring key = line.substr(0, eq);
-        std::wstring val = line.substr(eq + 1);
-        trim(key);
-        // Preserve leading/trailing spaces inside value only if intentional, just strip \r
-        if (!val.empty() && val.back() == L'\r') val.pop_back();
-
-        if (key.empty() || key.find(L' ') != std::wstring::npos) continue;
-        if (val.empty()) continue;
-
-        auto it = std::find_if(phrases.begin(), phrases.end(), [&](const Phrase& p) {
-            return _wcsicmp(p.shortcut.c_str(), key.c_str()) == 0;
-        });
-        if (it != phrases.end()) {
-            it->text = val;
-            it->enabled = true;
-        } else {
-            phrases.push_back(Phrase{GenerateId(), key, val, L"", true});
+        std::wstring k = ln.substr(0, eq);
+        trim(k);
+        if (k.empty() || k.size() > 32) return false;
+        for (wchar_t ch : k) {
+            if (ch == L' ' || ch == L'\t' || ch == L'/' || ch == L'\\' || ch == L':' || ch == L'?' || ch == L'&') {
+                return false;
+            }
         }
-        ++importedCount;
+        outKey = k;
+        outVal = ln.substr(eq + 1);
+        return true;
+    };
+
+    std::wstring curKey;
+    std::wstring curVal;
+    bool hasStartedVal = false;
+
+    auto flushCurrent = [&]() {
+        if (curKey.empty()) return;
+        while (!curVal.empty() && (curVal.back() == L'\r' || curVal.back() == L'\n')) {
+            curVal.pop_back();
+        }
+        if (!curVal.empty()) {
+            auto it = std::find_if(phrases.begin(), phrases.end(), [&](const Phrase& p) {
+                return _wcsicmp(p.shortcut.c_str(), curKey.c_str()) == 0;
+            });
+            if (it != phrases.end()) {
+                it->text = curVal;
+                it->enabled = true;
+            } else {
+                phrases.push_back(Phrase{GenerateId(), curKey, curVal, L"", true});
+            }
+            ++importedCount;
+        }
+        curKey.clear();
+        curVal.clear();
+        hasStartedVal = false;
+    };
+
+    while (std::getline(wss, line)) {
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
+
+        std::wstring nextKey, nextVal;
+        if (isShortcutHeader(line, nextKey, nextVal)) {
+            flushCurrent();
+            curKey = nextKey;
+            if (!nextVal.empty()) {
+                curVal = nextVal;
+                hasStartedVal = true;
+            } else {
+                curVal.clear();
+                hasStartedVal = false;
+            }
+            continue;
+        }
+
+        if (curKey.empty()) {
+            // Ignore blank lines or comments before the first shortcut entry
+            continue;
+        }
+
+        if (!hasStartedVal) {
+            // If header was "gl,2=" (empty right side), skip leading blank lines before first content line
+            std::wstring tmp = line;
+            trim(tmp);
+            if (tmp.empty()) continue;
+            curVal = line;
+            hasStartedVal = true;
+        } else {
+            curVal += L"\r\n";
+            curVal += line;
+        }
     }
+    flushCurrent();
+
     return importedCount;
 }

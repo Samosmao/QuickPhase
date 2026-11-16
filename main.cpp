@@ -64,7 +64,7 @@ int g_pendingDeleteLen = 0;
 CandidatePopup g_popup;
 SettingsWindow g_settingsWnd;
 OcrSnipTool g_ocrTool;
-bool g_autoTelegramOcr = true;
+bool g_autoTelegramOcr = false;
 HWND g_lastTgOcrHwnd = nullptr;
 bool g_lastScanWasAuto = false;
 
