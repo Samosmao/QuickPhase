@@ -25,6 +25,7 @@ constexpr UINT WM_APP_NEXT_PAGE = WM_APP + 5;
 constexpr UINT WM_APP_PREV_PAGE = WM_APP + 6;
 constexpr UINT WM_APP_OCR_RESULT = WM_APP + 7;
 constexpr UINT WM_APP_UPDATE_RESULT = WM_APP + 8;
+constexpr UINT WM_APP_TOGGLE_ENABLED = WM_APP + 9;
 
 constexpr UINT_PTR TIMER_PASTE_IMAGE = 1001;
 constexpr UINT_PTR TIMER_PASTE_TEXT = 1002;
@@ -67,6 +68,8 @@ OcrSnipTool g_ocrTool;
 bool g_autoTelegramOcr = false;
 HWND g_lastTgOcrHwnd = nullptr;
 bool g_lastScanWasAuto = false;
+bool g_shiftDownAlone = false;
+DWORD g_shiftDownTick = 0;
 
 std::wstring GetWindowProcessName(HWND hwnd) {
     if (!hwnd) return {};
@@ -219,21 +222,43 @@ void StartExpansion(const Phrase& phrase, int deleteCount) {
 }
 
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wp, LPARAM lp) {
-    if (nCode == HC_ACTION && !g_expanding && g_settings.enabled) {
+    if (nCode == HC_ACTION && !g_expanding) {
         auto* kb = reinterpret_cast<KBDLLHOOKSTRUCT*>(lp);
-        if ((kb->flags & LLKHF_INJECTED) == 0 && (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN)) {
+        if ((kb->flags & LLKHF_INJECTED) == 0) {
+            DWORD vk = kb->vkCode;
+            bool isShift = (vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_SHIFT);
             bool modDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) ||
                            (GetAsyncKeyState(VK_MENU) & 0x8000) ||
                            (GetAsyncKeyState(VK_LWIN) & 0x8000) ||
                            (GetAsyncKeyState(VK_RWIN) & 0x8000);
 
-            if (modDown) {
-                g_buffer.clear();
-                PostMessageW(g_hostHwnd, WM_APP_HIDE_POPUP, 0, 0);
+            if (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN) {
+                if (isShift) {
+                    if (modDown) {
+                        g_shiftDownAlone = false;
+                    } else if (!g_shiftDownAlone) {
+                        g_shiftDownAlone = true;
+                        g_shiftDownTick = GetTickCount();
+                    }
+                    return CallNextHookEx(g_kbHook, nCode, wp, lp);
+                }
+                g_shiftDownAlone = false;
+            } else if (wp == WM_KEYUP || wp == WM_SYSKEYUP) {
+                if (isShift && g_shiftDownAlone) {
+                    g_shiftDownAlone = false;
+                    if (!modDown && (GetTickCount() - g_shiftDownTick) < 600) {
+                        PostMessageW(g_hostHwnd, WM_APP_TOGGLE_ENABLED, 0, 0);
+                    }
+                }
                 return CallNextHookEx(g_kbHook, nCode, wp, lp);
             }
 
-            DWORD vk = kb->vkCode;
+            if (g_settings.enabled && (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN)) {
+                if (modDown) {
+                    g_buffer.clear();
+                    PostMessageW(g_hostHwnd, WM_APP_HIDE_POPUP, 0, 0);
+                    return CallNextHookEx(g_kbHook, nCode, wp, lp);
+                }
 
             // If candidate popup is visible, handle Sogou-style Space / 1-5 / - = / Esc
             if (g_popup.IsVisible() && !g_currentMatches.empty()) {
@@ -303,6 +328,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wp, LPARAM lp) {
                 }
                 PostMessageW(g_hostHwnd, WM_APP_UPDATE_POPUP, 0, 0);
             }
+            }
         }
     }
     return CallNextHookEx(g_kbHook, nCode, wp, lp);
@@ -310,6 +336,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wp, LPARAM lp) {
 
 LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wp, LPARAM lp) {
     if (nCode == HC_ACTION && wp == WM_LBUTTONDOWN && !g_expanding) {
+        g_shiftDownAlone = false;
         auto* ms = reinterpret_cast<MSLLHOOKSTRUCT*>(lp);
         HWND hit = WindowFromPoint(ms->pt);
         wchar_t cls[64]{};
@@ -396,6 +423,20 @@ LRESULT CALLBACK HostWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_APP_PREV_PAGE:
             g_popup.PrevPage();
+            return 0;
+
+        case WM_APP_TOGGLE_ENABLED:
+            g_settings.enabled = !g_settings.enabled;
+            g_buffer.clear();
+            g_currentMatches.clear();
+            g_popup.Hide();
+            SaveSettings(g_settings);
+            UpdateTrayIcon();
+            g_settingsWnd.SyncFromExternal(g_phrases, g_settings);
+            g_ocrTool.ShowQuickToast(
+                g_settings.enabled ? L"QuickPhrase: Script ON" : L"QuickPhrase: Default Keyboard",
+                g_settings.enabled ? L"Box & scripts enabled (tap Shift to pause)."
+                                   : L"Typing normal keyboard (tap Shift to resume).");
             return 0;
 
         case WM_APP_OCR_RESULT: {
